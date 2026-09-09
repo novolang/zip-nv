@@ -1,6 +1,6 @@
 [package]
 name        = "zip-nv"
-version     = "0.0.1"
+version     = "0.0.2"
 description = "The ZIP container over flate-nv, read the way a ZIP is meant to be read: parse the end record and the central directory from the tail a caller supplies, then ask for the byte range one entry needs. Local headers, ZIP64, stored and deflated entries, a writer that returns bytes as it goes, and the name check an extractor has to make."
 license     = "Apache-2.0"
 
@@ -38,4 +38,4 @@ maintainers = ["novo-lang"]
 # integrity check is exactly flate-nv's CRC32.  Both are `core`, so
 # `dep-layer` holds.  The path is what the monorepo builds against;
 # the version is what a consumer resolves.
-flate-nv = { path = "../flate-nv", version = "^0.0.1" }
+flate-nv = "^0.0.1"
