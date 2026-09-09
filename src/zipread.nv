@@ -1,0 +1,361 @@
+// zipread.nv — the load-bearing interface: ask the directory where an
+// entry's bytes are, then hand those bytes back to be decoded.
+//
+// THE SHAPE, AND WHY IT IS RANGES RATHER THAN A STREAM
+//
+// `zip-nv` is a `core` package, so it may not read a file — and a ZIP
+// is the one archive format where that is a HELP rather than a
+// constraint.  A ZIP is random-access by construction: the directory
+// at the end says where everything is, so a caller that can seek
+// should read three small ranges and nothing else.  Forcing a stream
+// on it would throw that away.
+//
+// So the read side is a conversation in ranges:
+//
+//     let end   = zipdir.find_end(tail, tail_offset)!          // ~64 KiB
+//     let arch  = zipdir.parse_directory(dir_bytes, end)!      // one range
+//     let entry = zipdir.entry_named(arch, "src/main.nv")
+//     let hdr   = zipread.local_header_range(e)                // 30 bytes
+//     let data  = zipread.data_range(e, header_bytes)!         // the payload
+//     let out   = zipread.decode_entry(e, data_bytes)!
+//
+// Every one of those is arithmetic; the caller does every read.  A
+// caller who has the whole archive in memory passes slices of one
+// buffer and the shape costs nothing.
+//
+// `ZipRange` IS THE ACTION THE CORE ASKS FOR
+//
+// It is the request half of the sans-IO design that
+// `docs/publishing.md` § Design describes: the core returns "give me
+// bytes 4,982,113 through 4,982,143" and the host performs it.  A
+// range is `[start, start + length)`, both absolute in the archive.
+//
+// WHY THERE IS ALSO A STREAMING FORM
+//
+// Because a ZIP arriving over a socket cannot be seeked, and a
+// `.zip` in a package manager's download is exactly that.
+// `stream_reader` reads it forwards from the local headers, which is
+// what every streaming unzip does, and it is DOCUMENTED AS WEAKER:
+// forwards reading trusts the local headers, and the local headers are
+// the copy that goes stale.  A caller who can seek should not use it.
+
+use zipentry
+use zipdir
+
+// A byte range in the archive: `[start, start + length)`.
+//
+// What this package asks the host for.  Both numbers are absolute
+// positions in the file, never offsets into a chunk, because a caller
+// that had to add a base would eventually forget to.
+//
+// ```novo
+// use zipread
+//
+// fn main() [io]
+//     println("${zipread.range(1024, 30).length}")         // 30
+// ```
+pub struct ZipRange
+    // The first byte, as an absolute offset in the archive.
+    start: Int
+    // How many bytes.  Zero is legal and means an empty entry.
+    length: Int
+
+// A range from a start and a length.
+//
+// ```novo
+// use zipread
+//
+// fn main() [io]
+//     println("${zipread.range(0, 0).length}")             // 0
+// ```
+pub fn range(start: Int, length: Int) -> ZipRange
+    todo("zip-nv.range")
+
+// The tail range a caller should read to find the end record.
+//
+// `min(file_size, zipdir.max_tail())` bytes from the end, which is the
+// first read of any ZIP and the only one whose size does not come from
+// a structure. It takes the file's size because that is the one fact
+// about the file this package cannot compute.
+//
+// ```novo
+// use zipread
+//
+// fn main() [io]
+//     println("${zipread.tail_range(100).start}")          // 0 — a small file
+// ```
+pub fn tail_range(file_size: Int) -> ZipRange
+    todo("zip-nv.tail_range")
+
+// The range the central directory occupies.
+//
+// Straight from the end record, and here rather than at the call site
+// so that a caller never composes the two numbers itself.
+//
+// ```novo
+// use zipread
+// use zipdir
+//
+// fn main() [io]
+//     println("${zipread.directory_range(zipdir.end_record(0, 1024, 200)).length}")   // 200
+// ```
+pub fn directory_range(end: ZipEndOfDirectory) -> ZipRange
+    todo("zip-nv.directory_range")
+
+// The range an entry's LOCAL HEADER's fixed part occupies: 30 bytes at
+// the offset the directory recorded.
+//
+// Fixed part only, because the name and extra field that follow have
+// lengths stored INSIDE those 30 bytes — so this is the read that
+// tells a caller how much more to read, and `data_range` is what
+// consumes the answer.
+//
+// ```novo
+// use zipread
+// use zipentry
+//
+// fn main() [io]
+//     println("${zipread.local_header_range(zipentry.stored_entry("a", 0, 0)).length}")   // 30
+// ```
+pub fn local_header_range(e: ZipEntry) -> ZipRange
+    todo("zip-nv.local_header_range")
+
+// An entry's local header, parsed from its fixed 30 bytes.
+//
+// `BadLocalSignature` when the bytes do not start `PK\x03\x04`, which
+// almost always means the directory's offset for this entry is wrong.
+//
+// ```novo
+// use zipread
+//
+// fn main() [io]
+//     match zipread.parse_local(bytes.from_str(""), 0)
+//         Ok(_)  => println("parsed")
+//         Err(_) => println("not a local header")          // this one
+// ```
+pub fn parse_local(header: Bytes, offset: Int) -> Result<ZipLocalHeader, ZipError>
+    todo("zip-nv.parse_local")
+
+// An entry's local header, as the copy stored next to its data.
+//
+// A separate value from `ZipEntry` ON PURPOSE.  The two are supposed
+// to agree and routinely do not: a streaming writer that did not know
+// a file's size writes zeroes here and the truth in the directory.
+// The directory is the authority; this is what the other copy said,
+// for the caller who wants to compare — and `check_local` is the
+// comparison.
+//
+// ```novo
+// use zipread
+//
+// fn main() [io]
+//     match zipread.parse_local(bytes.from_str(""), 0)
+//         Ok(h)  => println(h.name)
+//         Err(_) => println("not a local header")          // this one
+// ```
+pub struct ZipLocalHeader
+    // The name as the local header spells it. May differ from the
+    // directory's, and the directory's is the one to use.
+    name: Str
+    // The method the local header claims.
+    method: ZipMethod
+    // The CRC32 the local header claims, or 0 when flag bit 3 says it
+    // is in a data descriptor after the data instead.
+    crc32: Int
+    // The compressed size the local header claims, or 0 under flag
+    // bit 3.
+    compressed_size: Int
+    // The uncompressed size the local header claims, or 0 under flag
+    // bit 3.
+    uncompressed_size: Int
+    // How many bytes this header occupies in total: 30 plus the name
+    // and extra field. Adding it to the entry's `local_offset` is
+    // where the data starts.
+    header_length: Int
+    // The general-purpose flag as the local header carries it.
+    flags: Int
+
+// Where an entry's compressed bytes are.
+//
+// Needs the local header because a ZIP's central directory records
+// where the local HEADER starts, and a local header's length depends
+// on its own name and extra field — so the first byte of the data
+// cannot be computed from the directory alone. That asymmetry is the
+// format's; this is where it is paid, once.
+//
+// ```novo
+// use zipread
+// use zipentry
+//
+// fn main() [io]
+//     match zipread.parse_local(bytes.from_str(""), 0)
+//         Ok(h)  => println("${zipread.data_range(zipentry.stored_entry("a", 0, 0), h).start}")
+//         Err(_) => println("no header")                   // this one
+// ```
+pub fn data_range(e: ZipEntry, local: ZipLocalHeader) -> ZipRange
+    todo("zip-nv.data_range")
+
+// Whether an entry's two copies of its metadata agree.
+//
+// `None` when they do. `Some(reason)` naming the first disagreement
+// when they do not — which is not automatically an error: flag bit 3
+// makes zeroes in the local header LEGAL, and this accounts for that,
+// so a `Some` here means the archive is genuinely inconsistent rather
+// than merely streamed.
+//
+// A caller that does not care never calls this and gets the
+// directory's numbers, which is what `unzip` does.
+//
+// ```novo
+// use zipread
+// use zipentry
+//
+// fn main() [io]
+//     match zipread.parse_local(bytes.from_str(""), 0)
+//         Ok(h)  => match zipread.check_local(zipentry.stored_entry("a", 0, 0), h)
+//             Some(_) => println("the two copies disagree")
+//             None    => println("consistent")
+//         Err(_) => println("no header")                   // this one
+// ```
+pub fn check_local(e: ZipEntry, local: ZipLocalHeader) -> ?ZipError
+    todo("zip-nv.check_local")
+
+// Decode one entry: its compressed bytes in, its real bytes out,
+// verified.
+//
+// `data` is exactly the bytes `data_range` named.  Stored entries are
+// copied, deflated entries go through flate-nv as a RAW deflate stream
+// — a ZIP entry has no zlib or gzip wrapper, because the ZIP's own
+// structures carry the CRC and the lengths.
+//
+// The CRC32 and the length are both checked here, against what the
+// directory recorded, and a mismatch is `EntryCrcMismatch` or
+// `EntrySizeMismatch` naming the entry. `UnsupportedMethod` for
+// anything but stored and deflated; `EncryptedEntry` when the flag
+// says so.
+//
+// ```novo
+// use zipread
+// use zipentry
+//
+// fn main() [io]
+//     match zipread.decode_entry(zipentry.stored_entry("a.txt", 5, 0), bytes.from_str("hello"))
+//         Ok(_)  => println("decoded")
+//         Err(_) => println("the CRC did not match")       // this one
+// ```
+pub fn decode_entry(e: ZipEntry, data: Bytes) -> Result<Bytes, ZipError>
+    todo("zip-nv.decode_entry")
+
+// One entry out of an archive a caller has entirely in memory.
+//
+// The three ranges and the decode, composed — for the caller who read
+// the whole file rather than seeking into it, which is most callers
+// with a small archive. The archive bytes are indexed rather than
+// copied, so this costs no more than doing it by hand.
+//
+// ```novo
+// use zipread
+// use zipdir
+//
+// fn main() [io]
+//     match zipdir.parse_directory(bytes.from_str(""), zipdir.end_record(0, 0, 0))
+//         Ok(a)  => match zipread.read_entry(a, bytes.from_str(""), "a.txt")
+//             Ok(_)  => println("read")
+//             Err(_) => println("no such entry")
+//         Err(_) => println("malformed")                   // this one
+// ```
+pub fn read_entry(a: ZipArchive, archive: Bytes, name: Str) -> Result<Bytes, ZipError>
+    todo("zip-nv.read_entry")
+
+// Open an archive a caller has entirely in memory.
+//
+// `tail_range` + `find_end` + `directory_range` + `parse_directory`,
+// composed for the caller who has the bytes. The one call that gets a
+// small ZIP from a buffer to a directory.
+//
+// ```novo
+// use zipread
+//
+// fn main() [io]
+//     match zipread.open(bytes.from_str(""))
+//         Ok(_)  => println("opened")
+//         Err(_) => println("not a ZIP")                   // this one
+// ```
+pub fn open(archive: Bytes) -> Result<ZipArchive, ZipError>
+    todo("zip-nv.open")
+
+// Read a whole archive from a stream, forwards, and be charged exactly
+// what the stream costs.
+//
+// `S: Read[e]` binds the effect parameter of the standard library's
+// `Read` trait and the clause is `[e]`, so the row means "whatever the
+// impl behind `S` supplies" — a `File` charges `[io]`, an in-memory
+// `Buffer` nothing, and this package stays `core` (SPEC § 5.6).
+//
+// **This is the weaker way to read a ZIP and it says so.** Reading
+// forwards means trusting the LOCAL headers, which are the copy that
+// goes stale, and it means an entry under flag bit 3 has no size until
+// its data descriptor has been passed — so a streaming reader has to
+// scan for the next signature, which is a heuristic. Use it for a ZIP
+// arriving over a socket, which cannot be seeked. Use the
+// directory-first path for anything on disk.
+//
+// The pairs are `(entry, bytes)` in the order the file stores them,
+// with each entry taken from its local header and reconciled against
+// the directory at the end when one is reached.
+//
+// ```novo
+// use zipread
+//
+// fn unpack(path: Str) -> Result<[(ZipEntry, Bytes)], ZipError> [io, fs]
+//     match File.open_read(path)
+//         None    => Err(ZipSourceFailed(IoNotFound))
+//         Some(f) =>
+//             let h: File = f
+//             zipread.read_forwards(h)
+//
+// fn main() [io, fs]
+//     match unpack("bundle.zip")
+//         Ok(es) => println("${list.len(es)} entries")
+//         Err(e) => println(e.message())
+// ```
+pub fn read_forwards<S: Read[e]>(src: S) -> Result<[(ZipEntry, Bytes)], ZipError> [e]
+    todo("zip-nv.read_forwards")
+
+// An MS-DOS packed timestamp from calendar parts.
+//
+// A ZIP stores its times as MS-DOS did: the year as an offset from
+// 1980 in five bits, and the seconds in two-second units.  So the
+// resolution is two seconds, the earliest representable time is
+// 1980-01-01, and the latest is 2107.  None of that is negotiable and
+// all of it surprises people.
+//
+// The parts are the caller's because this package has no clock and no
+// calendar. `calendar-nv` is where a caller turns a date into these
+// six numbers.
+//
+// ```novo
+// use zipread
+//
+// fn main() [io]
+//     println("${zipread.dos_time_of(1980, 1, 1, 0, 0, 0)}")   // 2162688
+// ```
+pub fn dos_time_of(year: Int, month: Int, day: Int, hour: Int, minute: Int, second: Int) -> Int
+    todo("zip-nv.dos_time_of")
+
+// The six calendar parts an MS-DOS packed timestamp holds.
+//
+// `(year, month, day, hour, minute, second)`, with the second always
+// even because the format stores it in two-second units. The inverse
+// of `dos_time_of`, and the arithmetic a caller would otherwise get
+// wrong on the 1980 epoch.
+//
+// ```novo
+// use zipread
+//
+// fn main() [io]
+//     let (y, _, _, _, _, _) = zipread.dos_time_parts(2162688)
+//     println("${y}")                                      // 1980
+// ```
+pub fn dos_time_parts(packed: Int) -> (Int, Int, Int, Int, Int, Int)
+    todo("zip-nv.dos_time_parts")

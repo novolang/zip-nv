@@ -1,0 +1,287 @@
+// zipentry.nv — one entry as the central directory describes it.
+//
+// WHY THE ENTRY IS THE CENTRAL DIRECTORY'S VIEW AND NOT THE LOCAL
+// HEADER'S
+//
+// A ZIP stores every entry's metadata TWICE: once in a local header
+// immediately before the data, and once in the central directory at
+// the end of the file.  They are supposed to agree and routinely do
+// not — a streaming writer that did not know a file's size writes
+// zeroes in the local header and the truth in the directory, and a
+// tool that appended to an archive may have left a stale local header
+// behind entirely.
+//
+// **The central directory is the authority.**  That is not this
+// package's opinion; it is what makes a ZIP a random-access format at
+// all, and it is what `unzip` does.  So a `ZipEntry` is what the
+// directory said, `ZipLocalHeader` is a separate value for the caller
+// who wants to compare, and `zipread.check_local` is the comparison.
+// A caller who never asks never has to think about it.
+//
+// WHY `data_offset` IS NOT IN THE DIRECTORY
+//
+// Because the directory records where the LOCAL HEADER starts, and a
+// local header's length depends on its own name and extra fields — so
+// the first byte of an entry's data cannot be computed from the
+// directory alone.  `local_offset` is what the directory said;
+// `zipread.data_range` is what turns it into the range the data
+// occupies, and it needs the local header's bytes to do it.  That
+// asymmetry is the format's, not the interface's, and hiding it would
+// mean this package guessing at an offset it cannot know.
+
+// How an entry's bytes are stored.
+//
+// Two of them, because two of them work.  The prefixed spellings are
+// for the registry-wide constructor namespace (see the README).
+//
+// ```novo
+// use zipentry
+//
+// fn main() [io]
+//     println("${zipentry.method_code(ZipDeflated)}")      // 8
+// ```
+pub enum ZipMethod
+    // Method 0: the bytes are the file, uncompressed.  What every
+    // writer uses for data that is already compressed, and what makes
+    // a ZIP readable by a program with no DEFLATE implementation at
+    // all.
+    ZipStored
+    // Method 8: a raw DEFLATE stream, no zlib or gzip wrapper.  The
+    // CRC32 and both lengths live in the ZIP's own structures, which
+    // is why the entry needs no container of its own.
+    ZipDeflated
+
+// The method's numeric code, as the directory stores it.
+//
+// ```novo
+// use zipentry
+//
+// fn main() [io]
+//     println("${zipentry.method_code(ZipStored)}")        // 0
+// ```
+pub fn method_code(m: ZipMethod) -> Int
+    todo("zip-nv.method_code")
+
+// The method a code means, or `None` for one this package does not
+// implement.
+//
+// `None` rather than an error, because the caller that asks this is
+// usually deciding whether to skip an entry rather than failing on
+// it. `zipread` turns the `None` into `UnsupportedMethod` with the
+// entry's name when it is actually asked to decode one.
+//
+// ```novo
+// use zipentry
+//
+// fn main() [io]
+//     match zipentry.method_of(12)
+//         Some(_) => println("supported")
+//         None    => println("bzip2, which this package does not do")
+// ```
+pub fn method_of(code: Int) -> ?ZipMethod
+    todo("zip-nv.method_of")
+
+// One entry, as the central directory describes it.
+//
+// ```novo
+// use zipentry
+//
+// fn main() [io]
+//     println("${zipentry.stored_entry("a.txt", 0, 0).name}")     // a.txt
+// ```
+pub struct ZipEntry
+    // The entry's name: a relative path with `/` separators, as the
+    // format requires.  NOT sanitised — see the README, and see
+    // `is_safe_name`, which is the check a caller extracting to disk
+    // has to make.
+    name: Str
+    // How the bytes are stored.
+    method: ZipMethod
+    // The CRC32 of the UNCOMPRESSED bytes, which is the only
+    // integrity check a ZIP entry has.
+    crc32: Int
+    // How many bytes the entry occupies in the archive, after
+    // compression.
+    compressed_size: Int
+    // How many bytes it becomes.  For `ZipStored` the two are equal,
+    // and a directory where they are not is one to distrust.
+    uncompressed_size: Int
+    // Where this entry's LOCAL HEADER starts, as a byte offset in the
+    // archive.  Not where its data starts — see the module comment.
+    local_offset: Int
+    // The last-modified time, as MS-DOS's packed 32 bits: date in the
+    // high half, time in the low.  Kept packed because unpacking it
+    // needs a calendar and this package has none; `zipread`'s
+    // `dos_time_parts` is the arithmetic, and `calendar-nv` is where a
+    // caller turns the parts into a date.
+    dos_time: Int
+    // The entry's extra field, unparsed.  ZIP64, Unix permissions,
+    // NTFS timestamps and half a dozen vendor extensions all live in
+    // here as tagged records; this package reads the ZIP64 tag and
+    // hands the rest through.
+    extra: Bytes
+    // The entry's comment, as stored.
+    comment: Str
+    // The external attributes word.  Its meaning depends on the
+    // system that wrote the archive: on Unix the high 16 bits are the
+    // `st_mode`, on DOS the low byte is the attribute flags. This
+    // package does not interpret it, because it does not know what
+    // wrote the file.
+    external_attrs: Int
+    // The general-purpose bit flag. Bit 0 is encryption, bit 3 says
+    // the sizes are in a data descriptor after the data rather than
+    // in the local header, bit 11 says the name is UTF-8.
+    flags: Int
+
+// An entry for stored (uncompressed) bytes.
+//
+// The compressed and uncompressed sizes are the same by construction,
+// which is the invariant a hand-built stored entry gets wrong. The
+// time defaults to zero, which is a valid MS-DOS timestamp meaning
+// 1980-01-01 — a `core` package has no clock, and `with_dos_time` is
+// how a caller supplies a real one.
+//
+// ```novo
+// use zipentry
+//
+// fn main() [io]
+//     let e = zipentry.stored_entry("a.txt", 12, 0)
+//     println("${e.compressed_size == e.uncompressed_size}")   // true
+// ```
+pub fn stored_entry(name: Str, size: Int, crc: Int) -> ZipEntry
+    todo("zip-nv.stored_entry")
+
+// An entry for deflated bytes.
+//
+// Both sizes are the caller's, because only the caller knows how well
+// the data compressed — and the CRC32 is over the UNCOMPRESSED bytes,
+// which is the second thing a hand-built entry gets wrong.
+//
+// ```novo
+// use zipentry
+//
+// fn main() [io]
+//     let e = zipentry.deflated_entry("a.txt", 40, 12, 0)
+//     println("${e.uncompressed_size}")                    // 40
+// ```
+pub fn deflated_entry(name: Str, size: Int, packed: Int, crc: Int) -> ZipEntry
+    todo("zip-nv.deflated_entry")
+
+// The entry with an MS-DOS timestamp set.
+//
+// The packed 32-bit form: `zipread.dos_time_of` builds one from
+// calendar parts a caller supplies.  Zero is 1980-01-01 00:00, which
+// is what an entry with no time carries and is a real date rather
+// than a sentinel.
+//
+// ```novo
+// use zipentry
+//
+// fn main() [io]
+//     println("${zipentry.with_dos_time(zipentry.stored_entry("a", 0, 0), 0).dos_time}")
+// ```
+pub fn with_dos_time(e: ZipEntry, packed: Int) -> ZipEntry
+    todo("zip-nv.with_dos_time")
+
+// The entry with a comment set.
+//
+// ```novo
+// use zipentry
+//
+// fn main() [io]
+//     let e = zipentry.with_comment(zipentry.stored_entry("a", 0, 0), "generated")
+//     println(e.comment)                                   // generated
+// ```
+pub fn with_comment(e: ZipEntry, comment: Str) -> ZipEntry
+    todo("zip-nv.with_comment")
+
+// The entry with Unix permission bits set in its external attributes.
+//
+// The high 16 bits of the attributes word, which is where a Unix
+// writer puts `st_mode` — the convention every `unzip` honours and no
+// specification requires.  Setting it is what makes a script in an
+// archive still executable after extraction.
+//
+// ```novo
+// use zipentry
+//
+// fn main() [io]
+//     let e = zipentry.with_unix_mode(zipentry.stored_entry("run.sh", 0, 0), 493)
+//     println("${e.external_attrs > 0}")                   // true
+// ```
+pub fn with_unix_mode(e: ZipEntry, mode: Int) -> ZipEntry
+    todo("zip-nv.with_unix_mode")
+
+// The Unix permission bits an entry's external attributes carry, or
+// `None` when it was not written by a Unix tool.
+//
+// `None` is common and correct: an archive from Windows has no mode to
+// report, and inventing 0o644 for it would be this package guessing.
+//
+// ```novo
+// use zipentry
+//
+// fn main() [io]
+//     match zipentry.unix_mode(zipentry.stored_entry("a", 0, 0))
+//         Some(m) => println("${m}")
+//         None    => println("no Unix mode")               // this one
+// ```
+pub fn unix_mode(e: ZipEntry) -> ?Int
+    todo("zip-nv.unix_mode")
+
+// Whether the entry is a directory rather than a file.
+//
+// A ZIP has no directory type: an entry is a directory if its name
+// ends with `/`, and by convention if its size is zero.  That is the
+// whole rule, it is a convention rather than a specification, and it
+// is here so that a caller does not reimplement it — badly — at every
+// call site.
+//
+// ```novo
+// use zipentry
+//
+// fn main() [io]
+//     println("${zipentry.is_directory(zipentry.stored_entry("src/", 0, 0))}")   // true
+// ```
+pub fn is_directory(e: ZipEntry) -> Bool
+    todo("zip-nv.is_directory")
+
+// Whether the entry's name is safe to join onto a directory.
+//
+// **The check a caller extracting to disk must make.** True only when
+// the name is relative, has no `..` component, has no drive letter or
+// leading `/`, and contains no NUL or backslash. A ZIP entry name is
+// attacker-controlled text — "zip slip" is the name of this
+// vulnerability class, and it has been found in extractors in every
+// language.
+//
+// It is a predicate rather than a sanitiser because there is no single
+// right repair: dropping the entry, stripping the leading components
+// and rewriting the name are all reasonable, and which one is right
+// depends on what the caller is doing. This package will not choose,
+// and it will not pretend the question does not exist.
+//
+// ```novo
+// use zipentry
+//
+// fn main() [io]
+//     println("${zipentry.is_safe_name("../../etc/passwd")}")   // false
+// ```
+pub fn is_safe_name(name: Str) -> Bool
+    todo("zip-nv.is_safe_name")
+
+// Whether the entry is encrypted.
+//
+// Bit 0 of the general-purpose flag. Reported and not supported:
+// ZipCrypto is broken and AES-encrypted ZIPs are a vendor extension,
+// and a package that returned the ciphertext as if it were the file
+// would be worse than one that refuses.
+//
+// ```novo
+// use zipentry
+//
+// fn main() [io]
+//     println("${zipentry.is_encrypted(zipentry.stored_entry("a", 0, 0))}")   // false
+// ```
+pub fn is_encrypted(e: ZipEntry) -> Bool
+    todo("zip-nv.is_encrypted")

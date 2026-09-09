@@ -1,0 +1,235 @@
+// zipwrite.nv — the writer: entries in, archive bytes out, nothing
+// performed.
+//
+// THE SHAPE, AND WHY THE WRITER IS THE ONE STATEFUL THING HERE
+//
+// The read side is arithmetic over ranges because a ZIP is
+// random-access.  The write side cannot be: a ZIP is written
+// FORWARDS — local header, data, local header, data, then the whole
+// central directory, then the end record — and the directory needs
+// every entry's OFFSET, which is only known once everything before it
+// has been written.
+//
+//     var w = zipwrite.writer()
+//     let (w2, bytes1) = zipwrite.add_stored(w, "a.txt", data)!
+//     let (w3, bytes2) = zipwrite.add_deflated(w2, "b.txt", data, level)!
+//     let tail         = zipwrite.finish(w3)!     // directory + end record
+//
+// So the writer accumulates the DIRECTORY — a few dozen bytes per
+// entry — and nothing else.  A caller writing a 4 GiB archive holds a
+// few kilobytes of state, because every entry's bytes leave the writer
+// as soon as they are made.  That is the property that makes this a
+// `core` package rather than a memory hog wearing one's clothes.
+//
+// WHY `add_stored` AND `add_deflated` RATHER THAN ONE `add`
+//
+// Because the choice has consequences a caller should make on purpose:
+// stored is instant and makes the entry readable by a program with no
+// DEFLATE implementation; deflated is smaller and is not.  A single
+// `add` with a method argument would make the decision look
+// incidental, and an `add` that chose for the caller would be this
+// package guessing at whether the data is already compressed.
+//
+// WHAT THIS WRITER WILL NOT DO
+//
+// It does not encrypt — see the README. It does not write a data
+// descriptor (flag bit 3), because it always knows the size before it
+// writes the header, and a descriptor exists only for writers that do
+// not. It does not deduplicate names: a ZIP may legally hold two
+// entries called the same thing, and refusing would break the callers
+// who rely on that.
+
+use flate
+use zipentry
+
+// A writer part-way through an archive.
+//
+// Opaque in practice.  It holds the central directory it is building
+// and the current offset, and NOT the entries' data — every byte
+// leaves as soon as it is produced.
+//
+// ```novo
+// use zipwrite
+//
+// fn main() [io]
+//     println("${zipwrite.total_out(zipwrite.writer())}")      // 0
+// ```
+pub struct ZipWriter
+    // The directory entries accumulated so far, in the order they
+    // were added.
+    entries: [ZipEntry]
+    // How many bytes have been emitted, which is also where the next
+    // local header will start.
+    offset: Int
+    // Whether `finish` has been called.
+    done: Bool
+    // The archive comment to put in the end record.
+    comment: Str
+
+// A writer at the start of an archive.
+//
+// ```novo
+// use zipwrite
+//
+// fn main() [io]
+//     println("${zipwrite.entry_count(zipwrite.writer())}")    // 0
+// ```
+pub fn writer() -> ZipWriter
+    todo("zip-nv.writer")
+
+// The writer with an archive comment set.
+//
+// At most 65,535 bytes — the end record's length field is 16 bits —
+// and `finish` refuses a longer one rather than truncating it, which
+// is what most writers do and what makes a comment silently
+// disappear.
+//
+// ```novo
+// use zipwrite
+//
+// fn main() [io]
+//     println("${zipwrite.total_out(zipwrite.with_comment(zipwrite.writer(), "built"))}")   // 0
+// ```
+pub fn with_comment(w: ZipWriter, comment: Str) -> ZipWriter
+    todo("zip-nv.with_comment")
+
+// Add an entry whose bytes are stored uncompressed.
+//
+// The local header and the data, ready to write.  Instant, and it
+// makes the entry readable by a program with no DEFLATE
+// implementation at all — which is why an archive of already-compressed
+// data should use it.
+//
+// The CRC32 is computed here, over the bytes as given.
+//
+// ```novo
+// use zipwrite
+//
+// fn main() [io]
+//     match zipwrite.add_stored(zipwrite.writer(), "a.txt", bytes.from_str("hello"))
+//         Ok((_, b)) => println("${bytes.len(b) >= 35}")   // true
+//         Err(_)     => println("refused")
+// ```
+pub fn add_stored(w: ZipWriter, name: Str, data: Bytes) -> Result<(ZipWriter, Bytes), ZipError>
+    todo("zip-nv.add_stored")
+
+// Add an entry compressed with DEFLATE.
+//
+// A RAW deflate stream, with no zlib or gzip wrapper: the ZIP's own
+// structures carry the CRC32 and both lengths, so a container would be
+// six wasted bytes and a second checksum nothing reads.
+//
+// The level is a `FlateLevel` rather than a number, for the reason
+// flate-nv gives: `add_deflated(w, n, d, 6)` is a call nobody can
+// read.
+//
+// ```novo
+// use zipwrite
+// use flate
+//
+// fn main() [io]
+//     match zipwrite.add_deflated(zipwrite.writer(), "a.txt", bytes.from_str("hello"), flate.balanced())
+//         Ok((_, b)) => println("${bytes.len(b) > 0}")     // true
+//         Err(_)     => println("refused")
+// ```
+pub fn add_deflated(w: ZipWriter, name: Str, data: Bytes,
+                    level: FlateLevel) -> Result<(ZipWriter, Bytes), ZipError>
+    todo("zip-nv.add_deflated")
+
+// Add a directory entry: a name ending `/`, no data.
+//
+// A ZIP has no directory type — an entry is a directory because its
+// name ends with a slash — so this appends the slash if the caller did
+// not, which is the one place this package edits a name. Most
+// extractors create intervening directories anyway; writing them
+// explicitly is what preserves an empty one.
+//
+// ```novo
+// use zipwrite
+//
+// fn main() [io]
+//     match zipwrite.add_directory(zipwrite.writer(), "src")
+//         Ok((_, b)) => println("${bytes.len(b) > 0}")     // true
+//         Err(_)     => println("refused")
+// ```
+pub fn add_directory(w: ZipWriter, name: Str) -> Result<(ZipWriter, Bytes), ZipError>
+    todo("zip-nv.add_directory")
+
+// Add an entry from bytes that are ALREADY compressed.
+//
+// The re-archiving path: a caller copying an entry from one ZIP to
+// another has the deflated bytes, the CRC and both sizes, and
+// decompressing them only to compress them again would be slow and
+// would risk a different result. The entry is written as given, and
+// the caller is trusted with the numbers because it got them from a
+// directory that had them.
+//
+// ```novo
+// use zipwrite
+// use zipentry
+//
+// fn main() [io]
+//     let e = zipentry.deflated_entry("a.txt", 40, 12, 0)
+//     match zipwrite.add_raw(zipwrite.writer(), e, bytes.from_str(""))
+//         Ok((_, b)) => println("${bytes.len(b) > 0}")     // true
+//         Err(_)     => println("refused")
+// ```
+pub fn add_raw(w: ZipWriter, e: ZipEntry, data: Bytes) -> Result<(ZipWriter, Bytes), ZipError>
+    todo("zip-nv.add_raw")
+
+// End the archive: the central directory and the end record.
+//
+// Everything the writer has been accumulating, in one buffer, written
+// after the last entry's data.  The ZIP64 records go in automatically
+// when a field would not fit its 32 bits, so a caller never chooses
+// them; `Zip64Required` is what comes back if one is needed and could
+// not be written.  A comment over 65,535 bytes is refused here rather
+// than truncated, which is what most writers do and is what makes a
+// comment silently disappear.
+//
+// ```novo
+// use zipwrite
+//
+// fn main() [io]
+//     match zipwrite.finish(zipwrite.writer())
+//         Ok(b)  => println("${bytes.len(b)}")             // 22 — an empty archive
+//         Err(_) => println("refused")
+// ```
+pub fn finish(w: ZipWriter) -> Result<Bytes, ZipError>
+    todo("zip-nv.finish")
+
+// Bytes emitted so far, which is also where the next entry starts.
+//
+// ```novo
+// use zipwrite
+//
+// fn main() [io]
+//     println("${zipwrite.total_out(zipwrite.writer())}")      // 0
+// ```
+pub fn total_out(w: ZipWriter) -> Int
+    todo("zip-nv.total_out")
+
+// How many entries have been added.
+//
+// ```novo
+// use zipwrite
+//
+// fn main() [io]
+//     println("${zipwrite.entry_count(zipwrite.writer())}")    // 0
+// ```
+pub fn entry_count(w: ZipWriter) -> Int
+    todo("zip-nv.entry_count")
+
+// The directory entries as they will be written.
+//
+// For a caller building an index alongside the archive, or asserting
+// on what it just produced without parsing it back.
+//
+// ```novo
+// use zipwrite
+//
+// fn main() [io]
+//     println("${list.len(zipwrite.entries_of(zipwrite.writer()))}")   // 0
+// ```
+pub fn entries_of(w: ZipWriter) -> [ZipEntry]
+    todo("zip-nv.entries_of")

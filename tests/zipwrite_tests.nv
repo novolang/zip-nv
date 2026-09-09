@@ -1,0 +1,137 @@
+// zipwrite_tests.nv — the API suite for the writer.
+//
+// RED ON PURPOSE: every body is a `todo()`.  See zipentry_tests.nv for
+// why an interface package ships a failing suite.
+//
+// This suite is also the two-package build probe: it names `flate-nv`'s
+// `FlateLevel` and `zip-nv`'s own types in one compilation unit, so it
+// only compiles if the two packages' public type names do not collide.
+// That is a real check rather than a ceremonial one — struct and enum
+// identity is keyed by NAME across the whole assembly, so a second
+// package declaring `Level` or `Entry` would make the pair unusable
+// together, and this file would be where it showed.
+
+use std.test
+use flate
+use zipwrite
+use zipentry
+
+@test
+fn test_a_fresh_writer_has_written_nothing() [io]
+    test.case("no bytes, no entries")
+    let w = zipwrite.writer()
+    test.assert(zipwrite.total_out(w) == 0)
+    test.assert(zipwrite.entry_count(w) == 0)
+    test.assert(list.len(zipwrite.entries_of(w)) == 0)
+
+@test
+fn test_an_empty_archive_is_just_an_end_record() [io]
+    test.case("22 bytes, and it is a valid ZIP")
+    match zipwrite.finish(zipwrite.writer())
+        Ok(b)  => test.assert(bytes.len(b) == 22)
+        Err(_) => test.fail("an empty archive would not finish")
+
+@test
+fn test_a_stored_entry_is_a_local_header_and_its_bytes() [io]
+    test.case("30 bytes of header, five of name, five of data")
+    match zipwrite.add_stored(zipwrite.writer(), "a.txt", bytes.from_str("hello"))
+        Ok((w2, b)) =>
+            test.assert(bytes.len(b) == 40)
+            test.assert(zipwrite.entry_count(w2) == 1)
+            test.assert(zipwrite.total_out(w2) == 40)
+        Err(_)      => test.fail("a five-byte file would not write")
+
+@test
+fn test_the_offset_advances_by_what_was_written() [io]
+    test.case("which is where the next local header goes")
+    match zipwrite.add_stored(zipwrite.writer(), "a.txt", bytes.from_str("hello"))
+        Ok((w2, b)) => match zipwrite.add_stored(w2, "b.txt", bytes.from_str("hi"))
+            Ok((w3, b2)) => test.assert(zipwrite.total_out(w3) == bytes.len(b) + bytes.len(b2))
+            Err(_)       => test.fail("a second entry would not write")
+        Err(_)      => test.fail("a five-byte file would not write")
+
+@test
+fn test_a_stored_entry_records_equal_sizes() [io]
+    test.case("what the directory will say about it")
+    match zipwrite.add_stored(zipwrite.writer(), "a.txt", bytes.from_str("hello"))
+        Ok((w2, _)) => match list.first(zipwrite.entries_of(w2))
+            Some(e) =>
+                test.assert(e.uncompressed_size == 5)
+                test.assert(e.compressed_size == 5)
+            None    => test.fail("an entry was added and none was recorded")
+        Err(_)      => test.fail("a five-byte file would not write")
+
+@test
+fn test_a_deflated_entry_takes_a_level_value_not_a_number() [io]
+    test.case("flate-nv's FlateLevel, resolved across the package boundary")
+    match zipwrite.add_deflated(zipwrite.writer(), "a.txt", bytes.from_str("hello hello hello"), flate.balanced())
+        Ok((w2, b)) =>
+            test.assert(bytes.len(b) > 0)
+            test.assert(zipwrite.entry_count(w2) == 1)
+        Err(_)      => test.fail("a deflated entry would not write")
+
+@test
+fn test_every_level_is_accepted_by_the_writer() [io]
+    test.case("stored through smallest, all four constructors")
+    let data = bytes.from_str("hello hello hello hello")
+    match zipwrite.add_deflated(zipwrite.writer(), "a", data, flate.stored())
+        Ok(_)  => test.assert(true)
+        Err(_) => test.fail("level 0 was refused")
+    match zipwrite.add_deflated(zipwrite.writer(), "a", data, flate.smallest())
+        Ok(_)  => test.assert(true)
+        Err(_) => test.fail("level 9 was refused")
+
+@test
+fn test_a_directory_entry_gets_its_slash() [io]
+    test.case("the one place this package edits a name")
+    match zipwrite.add_directory(zipwrite.writer(), "src")
+        Ok((w2, _)) => match list.first(zipwrite.entries_of(w2))
+            Some(e) =>
+                test.assert(e.name == "src/")
+                test.assert(zipentry.is_directory(e))
+            None    => test.fail("a directory was added and none was recorded")
+        Err(_)      => test.fail("a directory entry would not write")
+
+@test
+fn test_a_directory_entry_has_no_data() [io]
+    test.case("just a local header and a name")
+    match zipwrite.add_directory(zipwrite.writer(), "src")
+        Ok((w2, _)) => match list.first(zipwrite.entries_of(w2))
+            Some(e) => test.assert(e.uncompressed_size == 0)
+            None    => test.fail("a directory was added and none was recorded")
+        Err(_)      => test.fail("a directory entry would not write")
+
+@test
+fn test_a_raw_entry_is_written_as_given() [io]
+    test.case("the re-archiving path: no decompress, no recompress")
+    let e = zipentry.deflated_entry("a.txt", 40, 12, 305419896)
+    match zipwrite.add_raw(zipwrite.writer(), e, bytes.from_str("012345678901"))
+        Ok((w2, _)) => match list.first(zipwrite.entries_of(w2))
+            Some(back) => test.assert(back.crc32 == 305419896)
+            None       => test.fail("a raw entry was added and none was recorded")
+        Err(_)      => test.fail("a raw entry would not write")
+
+@test
+fn test_two_entries_with_the_same_name_are_allowed() [io]
+    test.case("a ZIP may legally hold duplicates, and refusing would break callers")
+    match zipwrite.add_stored(zipwrite.writer(), "a.txt", bytes.from_str("one"))
+        Ok((w2, _)) => match zipwrite.add_stored(w2, "a.txt", bytes.from_str("two"))
+            Ok((w3, _)) => test.assert(zipwrite.entry_count(w3) == 2)
+            Err(_)      => test.fail("a duplicate name was refused")
+        Err(_)      => test.fail("the first entry would not write")
+
+@test
+fn test_an_archive_comment_lands_in_the_end_record() [io]
+    test.case("22 bytes plus the comment's own length")
+    match zipwrite.finish(zipwrite.with_comment(zipwrite.writer(), "built"))
+        Ok(b)  => test.assert(bytes.len(b) == 27)
+        Err(_) => test.fail("a commented archive would not finish")
+
+@test
+fn test_the_directory_follows_the_entries() [io]
+    test.case("one entry's directory header plus the end record")
+    match zipwrite.add_stored(zipwrite.writer(), "a.txt", bytes.from_str("hello"))
+        Ok((w2, _)) => match zipwrite.finish(w2)
+            Ok(tail) => test.assert(bytes.len(tail) == 73)
+            Err(_)   => test.fail("an archive with one entry would not finish")
+        Err(_)      => test.fail("a five-byte file would not write")

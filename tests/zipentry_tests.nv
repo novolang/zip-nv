@@ -1,0 +1,134 @@
+// zipentry_tests.nv — the API suite for one entry.
+//
+// RED ON PURPOSE.  Every body in this package is a `todo()`, so every
+// assertion below reaches `not implemented: zip-nv.<fn>` and the suite
+// fails.  That is the expected state of an interface package and it is
+// what makes these tests worth writing NOW: they compile against the
+// signatures, which is the claim being reviewed, and the day a body
+// lands the suite says whether the body agrees with what was promised.
+//
+// The block of assertions on `is_safe_name` is the one that matters
+// most.  It is the check an extractor has to make, "zip slip" is what
+// happens when it does not, and these are the shapes that have been
+// used in the wild.
+
+use std.test
+use zipentry
+
+@test
+fn test_the_two_methods_are_zero_and_eight() [io]
+    test.case("stored and deflated, as APPNOTE numbers them")
+    test.assert(zipentry.method_code(ZipStored) == 0)
+    test.assert(zipentry.method_code(ZipDeflated) == 8)
+
+@test
+fn test_a_known_code_maps_back() [io]
+    test.case("0 and 8 round-trip")
+    match zipentry.method_of(0)
+        Some(m) => test.assert(zipentry.method_code(m) == 0)
+        None    => test.fail("stored was not recognised")
+    match zipentry.method_of(8)
+        Some(m) => test.assert(zipentry.method_code(m) == 8)
+        None    => test.fail("deflated was not recognised")
+
+@test
+fn test_an_unsupported_method_is_none_not_an_error() [io]
+    test.case("bzip2 is 12, and a caller deciding to skip does not want a Result")
+    match zipentry.method_of(12)
+        Some(_) => test.fail("bzip2 was claimed as supported")
+        None    => test.assert(true)
+
+@test
+fn test_a_stored_entry_has_equal_sizes() [io]
+    test.case("the invariant a hand-built stored entry gets wrong")
+    let e = zipentry.stored_entry("a.txt", 12, 0)
+    test.assert(e.name == "a.txt")
+    test.assert(e.compressed_size == 12)
+    test.assert(e.uncompressed_size == 12)
+    test.assert(zipentry.method_code(e.method) == 0)
+
+@test
+fn test_a_deflated_entry_keeps_both_sizes() [io]
+    test.case("only the caller knows how well the data compressed")
+    let e = zipentry.deflated_entry("a.txt", 40, 12, 0)
+    test.assert(e.uncompressed_size == 40)
+    test.assert(e.compressed_size == 12)
+    test.assert(zipentry.method_code(e.method) == 8)
+
+@test
+fn test_the_time_default_is_the_dos_epoch() [io]
+    test.case("a core package has no clock, so an entry starts at 1980-01-01")
+    test.assert(zipentry.stored_entry("a", 0, 0).dos_time == 0)
+
+@test
+fn test_every_builder_changes_one_field() [io]
+    let base = zipentry.stored_entry("a.txt", 0, 0)
+
+    test.case("with_dos_time")
+    test.assert(zipentry.with_dos_time(base, 2162688).dos_time == 2162688)
+
+    test.case("with_comment")
+    test.assert(zipentry.with_comment(base, "generated").comment == "generated")
+
+    test.case("with_unix_mode leaves the name alone")
+    test.assert(zipentry.with_unix_mode(base, 493).name == "a.txt")
+
+@test
+fn test_a_unix_mode_round_trips_through_the_attributes_word() [io]
+    test.case("the high 16 bits, which is where every Unix writer puts it")
+    let e = zipentry.with_unix_mode(zipentry.stored_entry("run.sh", 0, 0), 493)
+    match zipentry.unix_mode(e)
+        Some(m) => test.assert(m == 493)
+        None    => test.fail("a mode this package set could not be read back")
+
+@test
+fn test_an_entry_with_no_unix_mode_says_so() [io]
+    test.case("an archive from Windows has none, and inventing 420 would be a guess")
+    match zipentry.unix_mode(zipentry.stored_entry("a.txt", 0, 0))
+        Some(_) => test.fail("a mode appeared from nowhere")
+        None    => test.assert(true)
+
+@test
+fn test_a_directory_is_a_trailing_slash() [io]
+    test.case("the format has no directory type, only the convention")
+    test.assert(zipentry.is_directory(zipentry.stored_entry("src/", 0, 0)))
+    test.assert(zipentry.is_directory(zipentry.stored_entry("src", 0, 0)) == false)
+
+@test
+fn test_a_fresh_entry_is_not_encrypted() [io]
+    test.case("bit 0 of the general-purpose flag is clear")
+    test.assert(zipentry.is_encrypted(zipentry.stored_entry("a", 0, 0)) == false)
+
+@test
+fn test_an_ordinary_name_is_safe() [io]
+    test.case("a relative path with forward slashes")
+    test.assert(zipentry.is_safe_name("src/main.nv"))
+    test.assert(zipentry.is_safe_name("a.txt"))
+    test.assert(zipentry.is_safe_name("deep/nested/dir/"))
+
+@test
+fn test_a_traversing_name_is_not_safe() [io]
+    test.case("the shape that gave zip slip its name")
+    test.assert(zipentry.is_safe_name("../../etc/passwd") == false)
+    test.assert(zipentry.is_safe_name("a/../../b") == false)
+    test.assert(zipentry.is_safe_name("..") == false)
+
+@test
+fn test_an_absolute_name_is_not_safe() [io]
+    test.case("a leading slash escapes the output directory just as well")
+    test.assert(zipentry.is_safe_name("/etc/passwd") == false)
+
+@test
+fn test_a_drive_letter_is_not_safe() [io]
+    test.case("the Windows form of the same escape")
+    test.assert(zipentry.is_safe_name("C:/Windows/System32/a.dll") == false)
+
+@test
+fn test_a_backslash_is_not_safe() [io]
+    test.case("a separator on the target and not on the format")
+    test.assert(zipentry.is_safe_name("..\\..\\Windows\\a.dll") == false)
+
+@test
+fn test_an_empty_name_is_not_safe() [io]
+    test.case("there is nothing to join, and joining nothing is the directory itself")
+    test.assert(zipentry.is_safe_name("") == false)

@@ -1,0 +1,117 @@
+// zipdir_tests.nv — the API suite for the central directory, which is
+// what a ZIP is read backwards from.
+//
+// RED ON PURPOSE: every body is a `todo()`.  See zipentry_tests.nv for
+// why an interface package ships a failing suite.
+//
+// The number worth asserting on here is 65,557: a 22-byte end record
+// plus a 65,535-byte comment.  It is the format's own bound and it is
+// what lets a caller with a 2 GiB archive read a 64 KiB tail instead
+// of the whole thing — so a `max_tail` that drifted would quietly turn
+// every open into a full read.
+
+use std.test
+use zipdir
+use zipentry
+use ziperror
+
+@test
+fn test_the_tail_bound_is_the_formats_own() [io]
+    test.case("22 bytes of record plus a 65,535-byte comment")
+    test.assert(zipdir.max_tail() == 65557)
+
+@test
+fn test_an_end_record_keeps_its_three_numbers() [io]
+    test.case("count, offset and size, unchanged")
+    let e = zipdir.end_record(3, 1024, 200)
+    test.assert(e.entry_count == 3)
+    test.assert(e.directory_offset == 1024)
+    test.assert(e.directory_size == 200)
+    test.assert(e.is_zip64 == false)
+
+@test
+fn test_a_comment_is_a_builder_and_changes_nothing_else() [io]
+    test.case("with_comment leaves the offsets alone")
+    let base = zipdir.end_record(3, 1024, 200)
+    let e = zipdir.with_comment(base, "built by novo-lang")
+    test.assert(e.comment == "built by novo-lang")
+    test.assert(e.directory_offset == base.directory_offset)
+    test.assert(e.entry_count == base.entry_count)
+
+@test
+fn test_no_end_record_in_an_empty_tail() [io]
+    test.case("a file that is not a ZIP, and a tail cut short, look the same from here")
+    match zipdir.find_end(bytes.from_str(""), 0)
+        Ok(_)                 => test.fail("nothing parsed as an end record")
+        Err(NoEndOfDirectory) => test.assert(true)
+        Err(_)                => test.fail("refused for the wrong reason")
+
+@test
+fn test_no_end_record_in_plain_text() [io]
+    test.case("and text with no PK signature in it is not one either")
+    match zipdir.find_end(bytes.from_str("this is not a zip archive at all"), 0)
+        Ok(_)                 => test.fail("plain text parsed as an end record")
+        Err(NoEndOfDirectory) => test.assert(true)
+        Err(_)                => test.fail("refused for the wrong reason")
+
+@test
+fn test_the_absence_of_a_record_has_no_offset() [io]
+    test.case("there is no place to point at")
+    test.assert(ziperror.offset_of(NoEndOfDirectory) == -1)
+
+@test
+fn test_a_directory_shorter_than_it_claims_is_out_of_range() [io]
+    test.case("a record claiming 46 bytes with none supplied")
+    match zipdir.parse_directory(bytes.from_str(""), zipdir.end_record(1, 0, 46))
+        Ok(_)  => test.fail("an empty buffer parsed as one directory entry")
+        Err(_) => test.assert(true)
+
+@test
+fn test_a_directory_header_with_the_wrong_signature_is_named() [io]
+    test.case("PK\\x03\\x04 where PK\\x01\\x02 was expected")
+    let local = bytes.from_str("PK\x03\x04and then some more bytes to fill a header out")
+    match zipdir.parse_directory(local, zipdir.end_record(1, 0, bytes.len(local)))
+        Ok(_)                            => test.fail("a local header parsed as a directory entry")
+        Err(BadDirectorySignature(_, _)) => test.assert(true)
+        Err(_)                           => test.fail("refused for the wrong reason")
+
+@test
+fn test_an_empty_directory_has_no_entries() [io]
+    test.case("a ZIP with nothing in it is a valid ZIP")
+    match zipdir.parse_directory(bytes.from_str(""), zipdir.end_record(0, 0, 0))
+        Ok(a)  =>
+            test.assert(zipdir.entry_count(a) == 0)
+            test.assert(list.len(zipdir.names(a)) == 0)
+        Err(_) => test.fail("an empty directory was refused")
+
+@test
+fn test_an_index_past_the_end_is_none() [io]
+    test.case("entry_at does not panic on an empty archive")
+    match zipdir.parse_directory(bytes.from_str(""), zipdir.end_record(0, 0, 0))
+        Ok(a)  => match zipdir.entry_at(a, 0)
+            Some(_) => test.fail("an empty archive produced an entry")
+            None    => test.assert(true)
+        Err(_) => test.fail("an empty directory was refused")
+
+@test
+fn test_a_name_that_is_not_there_is_none() [io]
+    test.case("and entry_named does not panic either")
+    match zipdir.parse_directory(bytes.from_str(""), zipdir.end_record(0, 0, 0))
+        Ok(a)  => match zipdir.entry_named(a, "src/main.nv")
+            Some(_) => test.fail("an empty archive produced an entry")
+            None    => test.assert(true)
+        Err(_) => test.fail("an empty directory was refused")
+
+@test
+fn test_a_directory_header_is_at_least_46_bytes() [io]
+    test.case("46 fixed, plus the name and the extra field and the comment")
+    let b = zipdir.emit_directory_header(zipentry.stored_entry("a.txt", 0, 0))
+    test.assert(bytes.len(b) == 51)
+
+@test
+fn test_an_empty_end_record_is_22_bytes() [io]
+    test.case("and an archive comment lengthens it by exactly its own length")
+    let bare = zipdir.emit_end(zipdir.end_record(0, 0, 0))
+    test.assert(bytes.len(bare) == 22)
+    let commented = zipdir.emit_end(zipdir.with_comment(zipdir.end_record(0, 0, 0), "hi"))
+    test.assert(bytes.len(commented) == 24)

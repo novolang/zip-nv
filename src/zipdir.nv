@@ -1,0 +1,288 @@
+// zipdir.nv — the central directory: the structure a ZIP is read
+// backwards from.
+//
+// WHY THE READ SIDE IS DIRECTORY-FIRST
+//
+// Because a ZIP is written forwards and read BACKWARDS, and no other
+// arrangement works.  The end-of-central-directory record is the last
+// thing in the file; it points at the central directory; the directory
+// points at each local header; each local header precedes its data.
+// A reader that started at byte zero and went forwards could read the
+// entries in order — many do — but it would be trusting the local
+// headers, which are the copy that goes stale, and it could not answer
+// "give me `src/main.nv`" without reading everything before it.
+//
+// So this package's read side is: hand it the tail of the file, get a
+// `ZipArchive`; ask that for an entry by name or by index; ask
+// `zipread` for the byte range that entry needs; hand it those bytes.
+// A caller with a seekable file reads three small ranges to extract
+// one entry from a 2 GiB archive, and a caller with the whole thing in
+// memory passes the same buffer three times.  Neither has to
+// understand the format.
+//
+// WHY `find_end` TAKES THE TAIL AND NOT THE FILE
+//
+// The EOCD is 22 bytes plus a comment of at most 65,535, so it lies
+// within the last 65,557 bytes and NOWHERE ELSE.  That bound is the
+// format's, and it is what lets a caller with a large file read a
+// 64 KiB tail instead of the whole thing.  `find_end` takes those
+// bytes and the absolute offset they came from, so the offsets it
+// returns are positions in the file rather than in the caller's
+// buffer — which is the thing a reader that forgot the base offset
+// gets wrong.
+//
+// ZIP64 IS NOT AN OPTION HERE
+//
+// An archive over 4 GiB, or with over 65,535 entries, stores its real
+// numbers in a ZIP64 record and leaves 0xFFFFFFFF sentinels in the
+// classic fields.  This package reads them, because an archive that
+// large is exactly the archive a caller could not have handled by hand
+// — and `Zip64Required` is what it says when a sentinel has no record
+// behind it.
+
+use zipentry
+
+// The end-of-central-directory record: where the directory is and how
+// big it is.
+//
+// One value covering both the classic 22-byte record and the ZIP64
+// pair behind it, because a caller does not care which was on disk —
+// it cares where the directory is. `is_zip64` says which it was, for
+// the caller re-writing an archive that has to keep the same shape.
+//
+// ```novo
+// use zipdir
+//
+// fn main() [io]
+//     println("${zipdir.end_record(0, 0, 0).entry_count}")     // 0
+// ```
+pub struct ZipEndOfDirectory
+    // How many entries the directory holds.
+    entry_count: Int
+    // Where the central directory starts, as an absolute byte offset.
+    directory_offset: Int
+    // How many bytes the central directory occupies.
+    directory_size: Int
+    // The archive's comment, as stored.
+    comment: Str
+    // Whether the real numbers came from a ZIP64 record rather than
+    // from the classic 32-bit fields.
+    is_zip64: Bool
+
+// An end record from its three numbers.
+//
+// For a writer building one, and for a test. A reader gets its end
+// record from `find_end`.
+//
+// ```novo
+// use zipdir
+//
+// fn main() [io]
+//     println("${zipdir.end_record(3, 1024, 200).directory_offset}")   // 1024
+// ```
+pub fn end_record(count: Int, offset: Int, size: Int) -> ZipEndOfDirectory
+    todo("zip-nv.end_record")
+
+// The end record with an archive comment set.
+//
+// At most 65,535 bytes — the field's length is 16 bits — and a longer
+// one is silently truncated by most writers, which is why this
+// package's writer refuses instead.
+//
+// ```novo
+// use zipdir
+//
+// fn main() [io]
+//     println(zipdir.with_comment(zipdir.end_record(0, 0, 0), "built").comment)
+// ```
+pub fn with_comment(e: ZipEndOfDirectory, comment: Str) -> ZipEndOfDirectory
+    todo("zip-nv.with_comment")
+
+// Find the end-of-central-directory record in the tail of an archive.
+//
+// `tail` is the last bytes of the file — at least 22 and at most
+// 65,557, which is the format's own bound and therefore all a caller
+// ever needs to read — and `tail_offset` is where those bytes start in
+// the file, so every offset in the result is an absolute position.
+//
+// `NoEndOfDirectory` when the signature is not there. That is the
+// answer for a file that is not a ZIP, and also for one whose tail was
+// cut short — the two are indistinguishable from the tail alone, which
+// is why the message says what it looked for rather than what is
+// wrong.
+//
+// ZIP64 is resolved here: when the classic record's fields are at
+// their sentinels, the locator behind it is followed and the real
+// numbers come back in the same value.
+//
+// ```novo
+// use zipdir
+//
+// fn main() [io]
+//     match zipdir.find_end(bytes.from_str(""), 0)
+//         Ok(_)  => println("found")
+//         Err(_) => println("not a ZIP")                   // this one
+// ```
+pub fn find_end(tail: Bytes, tail_offset: Int) -> Result<ZipEndOfDirectory, ZipError>
+    todo("zip-nv.find_end")
+
+// How many bytes of tail `find_end` could possibly need.
+//
+// 65,557: a 22-byte record plus a 65,535-byte comment. A caller with a
+// seekable file reads `min(file_size, this)` from the end and is
+// guaranteed to have the record if the file has one — which is the
+// whole reason a ZIP can be opened without reading it.
+//
+// ```novo
+// use zipdir
+//
+// fn main() [io]
+//     println("${zipdir.max_tail()}")                      // 65557
+// ```
+pub fn max_tail() -> Int
+    todo("zip-nv.max_tail")
+
+// A parsed central directory: every entry, in the order the directory
+// lists them.
+//
+// ```novo
+// use zipdir
+//
+// fn main() [io]
+//     match zipdir.parse_directory(bytes.from_str(""), zipdir.end_record(0, 0, 0))
+//         Ok(a)  => println("${zipdir.entry_count(a)}")     // 0
+//         Err(_) => println("malformed")
+// ```
+pub struct ZipArchive
+    // The entries, in directory order — which is usually the order
+    // they were added and is NOT sorted by name.  Preserved because a
+    // caller re-writing an archive wants the same order, and because
+    // some archives use it to mean something.
+    entries: [ZipEntry]
+    // The end record the directory was found from, so a caller has
+    // the comment and the ZIP64 flag without carrying two values.
+    end: ZipEndOfDirectory
+
+// Parse the central directory from the bytes it occupies.
+//
+// `data` is the `directory_size` bytes at `directory_offset` — which
+// `find_end` just told the caller — and nothing else. A caller with a
+// seekable file reads exactly that range; a caller with the whole
+// archive in memory passes a slice of it.
+//
+// `BadDirectorySignature` with the four bytes that were there when a
+// header does not start with `PK\x01\x02`, `DirectoryOutOfRange` when
+// the record claims more bytes than were supplied.
+//
+// ```novo
+// use zipdir
+//
+// fn main() [io]
+//     match zipdir.parse_directory(bytes.from_str(""), zipdir.end_record(1, 0, 46))
+//         Ok(_)  => println("parsed")
+//         Err(_) => println("short")                       // this one
+// ```
+pub fn parse_directory(data: Bytes, end: ZipEndOfDirectory) -> Result<ZipArchive, ZipError>
+    todo("zip-nv.parse_directory")
+
+// How many entries the archive holds.
+//
+// ```novo
+// use zipdir
+//
+// fn main() [io]
+//     println("${zipdir.max_tail() > 0}")                  // true
+// ```
+pub fn entry_count(a: ZipArchive) -> Int
+    todo("zip-nv.entry_count")
+
+// The entry at an index, in directory order.
+//
+// `None` past the end. Index rather than name for the caller
+// iterating, because a ZIP may legally hold two entries with the same
+// name and a name lookup has to pick one.
+//
+// ```novo
+// use zipdir
+//
+// fn main() [io]
+//     match zipdir.parse_directory(bytes.from_str(""), zipdir.end_record(0, 0, 0))
+//         Ok(a)  => match zipdir.entry_at(a, 0)
+//             Some(_) => println("have one")
+//             None    => println("empty archive")
+//         Err(_) => println("malformed")
+// ```
+pub fn entry_at(a: ZipArchive, index: Int) -> ?ZipEntry
+    todo("zip-nv.entry_at")
+
+// The entry with a name, or `None`.
+//
+// The LAST entry with that name, which is what every extractor does
+// and is worth stating: a ZIP may hold duplicates, and an archive
+// built by appending has the newest copy last. A caller who needs to
+// see the duplicates iterates by index.
+//
+// The comparison is byte-exact — no case folding, no Unicode
+// normalisation — because a ZIP name is bytes and the encoding is only
+// known when bit 11 of the flags says UTF-8.
+//
+// ```novo
+// use zipdir
+//
+// fn main() [io]
+//     match zipdir.parse_directory(bytes.from_str(""), zipdir.end_record(0, 0, 0))
+//         Ok(a)  => match zipdir.entry_named(a, "src/main.nv")
+//             Some(_) => println("found")
+//             None    => println("no such entry")
+//         Err(_) => println("malformed")
+// ```
+pub fn entry_named(a: ZipArchive, name: Str) -> ?ZipEntry
+    todo("zip-nv.entry_named")
+
+// Every entry's name, in directory order.
+//
+// The listing a caller prints, and the cheapest thing a directory
+// answers.
+//
+// ```novo
+// use zipdir
+//
+// fn main() [io]
+//     match zipdir.parse_directory(bytes.from_str(""), zipdir.end_record(0, 0, 0))
+//         Ok(a)  => println("${list.len(zipdir.names(a))}")
+//         Err(_) => println("malformed")
+// ```
+pub fn names(a: ZipArchive) -> [Str]
+    todo("zip-nv.names")
+
+// One entry's 46-byte-or-longer central-directory header, as bytes.
+//
+// The writer's half. The length varies with the name, the extra field
+// and the comment, which is why it is returned rather than written
+// into a fixed buffer.
+//
+// ```novo
+// use zipdir
+// use zipentry
+//
+// fn main() [io]
+//     let b = zipdir.emit_directory_header(zipentry.stored_entry("a.txt", 0, 0))
+//     println("${bytes.len(b) >= 46}")                     // true
+// ```
+pub fn emit_directory_header(e: ZipEntry) -> Bytes
+    todo("zip-nv.emit_directory_header")
+
+// The end-of-central-directory record, as bytes.
+//
+// 22 bytes plus the comment, and the ZIP64 pair in front of it when
+// any field would not fit its 32 bits — which the caller does not have
+// to detect, because this does.
+//
+// ```novo
+// use zipdir
+//
+// fn main() [io]
+//     println("${bytes.len(zipdir.emit_end(zipdir.end_record(0, 0, 0)))}")   // 22
+// ```
+pub fn emit_end(e: ZipEndOfDirectory) -> Bytes
+    todo("zip-nv.emit_end")

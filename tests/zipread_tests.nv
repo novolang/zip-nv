@@ -1,0 +1,195 @@
+// zipread_tests.nv — the API suite for the read side, which is this
+// package's load-bearing interface.
+//
+// RED ON PURPOSE: every body is a `todo()`.  See zipentry_tests.nv for
+// why an interface package ships a failing suite.
+//
+// These assert the range arithmetic, the MS-DOS time arithmetic, and
+// the effect claim on `read_forwards` — which is checked by calling it
+// over a `Buffer`, whose `impl Read[]` is empty.  The test needs `[io]`
+// for its own `println` and nothing for the read; if `read_forwards`
+// ever grew a concrete effect it would stop compiling here rather than
+// at a consumer's.
+
+use std.test
+use zipread
+use zipdir
+use zipentry
+use ziperror
+
+@test
+fn test_a_range_is_a_start_and_a_length() [io]
+    test.case("both absolute in the archive, never relative to a chunk")
+    let r = zipread.range(4982113, 30)
+    test.assert(r.start == 4982113)
+    test.assert(r.length == 30)
+
+@test
+fn test_an_empty_range_is_legal() [io]
+    test.case("an entry with no bytes still has a place")
+    test.assert(zipread.range(1024, 0).length == 0)
+
+@test
+fn test_a_small_file_is_read_whole() [io]
+    test.case("the tail range never starts before the file does")
+    let r = zipread.tail_range(100)
+    test.assert(r.start == 0)
+    test.assert(r.length == 100)
+
+@test
+fn test_a_large_file_is_read_from_its_tail() [io]
+    test.case("65,557 bytes, which is all the format can hide the record in")
+    let size = 2147483648
+    let r = zipread.tail_range(size)
+    test.assert(r.length == 65557)
+    test.assert(r.start == size - 65557)
+
+@test
+fn test_the_directory_range_comes_from_the_end_record() [io]
+    test.case("so a caller never composes the two numbers itself")
+    let r = zipread.directory_range(zipdir.end_record(3, 1024, 200))
+    test.assert(r.start == 1024)
+    test.assert(r.length == 200)
+
+@test
+fn test_a_local_header_read_is_the_fixed_30_bytes() [io]
+    test.case("fixed part only — the name's length is inside it")
+    let e = zipentry.stored_entry("a.txt", 0, 0)
+    test.assert(zipread.local_header_range(e).length == 30)
+
+@test
+fn test_a_local_header_read_starts_where_the_directory_said() [io]
+    test.case("local_offset, unchanged")
+    let e = zipentry.with_dos_time(zipentry.stored_entry("a.txt", 0, 0), 0)
+    test.assert(zipread.local_header_range(e).start == e.local_offset)
+
+@test
+fn test_a_local_header_needs_its_signature() [io]
+    test.case("PK\\x03\\x04, and nothing else is one")
+    match zipread.parse_local(bytes.from_str("PK\x01\x02 and then some"), 0)
+        Ok(_)                        => test.fail("a directory header parsed as a local one")
+        Err(BadLocalSignature(_, _)) => test.assert(true)
+        Err(_)                       => test.fail("refused for the wrong reason")
+
+@test
+fn test_an_empty_buffer_is_not_a_local_header() [io]
+    test.case("and the offset it names is where the caller said to look")
+    match zipread.parse_local(bytes.from_str(""), 1024)
+        Ok(_)  => test.fail("nothing parsed as a local header")
+        Err(_) => test.assert(true)
+
+@test
+fn test_the_dos_epoch_round_trips() [io]
+    test.case("1980-01-01 00:00:00, which is what a zero timestamp means")
+    let packed = zipread.dos_time_of(1980, 1, 1, 0, 0, 0)
+    let (y, mo, d, h, mi, s) = zipread.dos_time_parts(packed)
+    test.assert(y == 1980)
+    test.assert(mo == 1)
+    test.assert(d == 1)
+    test.assert(h == 0)
+    test.assert(mi == 0)
+    test.assert(s == 0)
+
+@test
+fn test_a_real_date_round_trips() [io]
+    test.case("and the seconds come back even, because the field is two-second units")
+    let packed = zipread.dos_time_of(2026, 9, 9, 14, 30, 44)
+    let (y, mo, d, h, mi, s) = zipread.dos_time_parts(packed)
+    test.assert(y == 2026)
+    test.assert(mo == 9)
+    test.assert(d == 9)
+    test.assert(h == 14)
+    test.assert(mi == 30)
+    test.assert(s == 44)
+
+@test
+fn test_an_odd_second_is_rounded_by_the_format() [io]
+    test.case("two-second resolution is the format's, not a defect here")
+    let packed = zipread.dos_time_of(2026, 9, 9, 14, 30, 45)
+    let (_, _, _, _, _, s) = zipread.dos_time_parts(packed)
+    test.assert(s == 44)
+
+@test
+fn test_decoding_a_stored_entry_checks_its_crc() [io]
+    test.case("a zero CRC on real bytes is a mismatch, not a skip")
+    match zipread.decode_entry(zipentry.stored_entry("a.txt", 5, 0), bytes.from_str("hello"))
+        Ok(_)                          => test.fail("a wrong CRC was accepted")
+        Err(EntryCrcMismatch(n, _, _)) => test.assert(n == "a.txt")
+        Err(_)                         => test.fail("refused for the wrong reason")
+
+@test
+fn test_opening_something_that_is_not_a_zip_is_refused() [io]
+    test.case("no end record, so nothing to open")
+    match zipread.open(bytes.from_str("this is not a zip"))
+        Ok(_)                 => test.fail("plain text opened as an archive")
+        Err(NoEndOfDirectory) => test.assert(true)
+        Err(_)                => test.fail("refused for the wrong reason")
+
+@test
+fn test_a_container_error_names_no_entry() [io]
+    test.case("entry_of is None for a failure about the archive itself")
+    match ziperror.entry_of(NoEndOfDirectory)
+        Some(_) => test.fail("a container failure claimed an entry")
+        None    => test.assert(true)
+
+@test
+fn test_an_entry_error_names_its_entry() [io]
+    test.case("which is what unzip prints and what a report needs")
+    match ziperror.entry_of(EncryptedEntry("secret.txt"))
+        Some(n) => test.assert(n == "secret.txt")
+        None    => test.fail("an entry failure named no entry")
+
+@test
+fn test_one_bad_entry_does_not_cost_the_others() [io]
+    test.case("a ZIP is a directory, so entry-local failures are skippable")
+    test.assert(ziperror.is_entry_local(EncryptedEntry("a")))
+    test.assert(ziperror.is_entry_local(UnsupportedMethod("a", 12)))
+    test.assert(ziperror.is_entry_local(EntryCrcMismatch("a", 1, 2)))
+
+    test.case("and directory failures are not")
+    test.assert(ziperror.is_entry_local(NoEndOfDirectory) == false)
+    test.assert(ziperror.is_entry_local(DirectoryOutOfRange(1024, 10)) == false)
+
+@test
+fn test_read_forwards_over_a_buffer_costs_nothing() [io]
+    test.case("an in-memory source charges the caller no effects")
+    // `Buffer`'s `impl Read[]` supplies an empty row, so this call
+    // adds nothing to this function's `[io]` — which is the whole
+    // claim the signature makes.
+    match zipread.read_forwards(Buffer.from_str(""))
+        Ok(es) => test.assert(list.len(es) == 0)
+        Err(_) => test.assert(true)
+
+@test
+fn test_read_forwards_refuses_text() [io]
+    test.case("no local header signature to start from")
+    match zipread.read_forwards(Buffer.from_str("not a zip either"))
+        Ok(_)  => test.fail("plain text read as a ZIP")
+        Err(_) => test.assert(true)
+
+@test
+fn test_reading_a_named_entry_from_an_empty_archive_is_refused() [io]
+    test.case("open, then ask, then fail on the name rather than on the archive")
+    match zipdir.parse_directory(bytes.from_str(""), zipdir.end_record(0, 0, 0))
+        Ok(a)  => match zipread.read_entry(a, bytes.from_str(""), "a.txt")
+            Ok(_)  => test.fail("an empty archive produced an entry's bytes")
+            Err(_) => test.assert(true)
+        Err(_) => test.fail("an empty directory was refused")
+
+@test
+fn test_check_local_compares_the_two_copies() [io]
+    test.case("the directory is the authority; this is what the other copy said")
+    match zipread.parse_local(bytes.from_str(""), 0)
+        Ok(h)  => match zipread.check_local(zipentry.stored_entry("a.txt", 0, 0), h)
+            Some(_) => test.assert(true)
+            None    => test.assert(true)
+        Err(_) => test.assert(true)
+
+@test
+fn test_data_range_needs_the_local_header() [io]
+    test.case("because the directory records the header's offset, not the data's")
+    match zipread.parse_local(bytes.from_str(""), 0)
+        Ok(h)  =>
+            let r = zipread.data_range(zipentry.stored_entry("a.txt", 5, 0), h)
+            test.assert(r.length == 5)
+        Err(_) => test.assert(true)

@@ -1,0 +1,168 @@
+// ziperror.nv — every way a ZIP archive can refuse to be read, and
+// where.
+//
+// WHY A ZIP ERROR NAMES AN ENTRY AND NOT ONLY AN OFFSET
+//
+// Because a ZIP is a directory, and the thing a caller was doing when
+// it failed was asking for a named entry.  "CRC mismatch at offset
+// 4,982,113" is a fact; "src/main.nv: CRC mismatch" is the same fact
+// in the vocabulary the caller used.  So the entry-level failures
+// carry the name, the container-level ones carry the offset, and none
+// of them carries both, because a variant that offered a name it
+// sometimes did not have would be a variant every caller had to
+// check.
+//
+// THE OFFSETS ARE INTO THE FILE, NOT INTO A CHUNK
+//
+// zip-nv's read side is directory-first: a caller supplies a byte
+// range and gets back structure.  Every offset here is therefore an
+// absolute position in the archive, which is what a caller has to seek
+// to anyway and what `unzip -l` prints.
+//
+// `ZipSourceFailed` IS THE LAYER SEAM, and `ZipFlateFailed` is the
+// SECOND one — a ZIP entry's bytes are a DEFLATE stream, and when that
+// stream is corrupt the reason belongs to flate-nv.  Carrying its
+// `FlateError` through rather than flattening it to a string is what
+// keeps `flateerror.offset_of` usable from out here, so a caller can
+// still find the bad byte.  Neither is called `Transport`: csv-nv's
+// `CsvError` owns that constructor name across the registry, and a
+// variant constructor resolves by name rather than by the type the
+// expression needs.
+
+// Why a ZIP archive, or a request about one, could not be answered.
+//
+// ```novo
+// use ziperror
+//
+// fn main() [io]
+//     println("${ziperror.offset_of(NoEndOfDirectory)}")   // -1
+// ```
+pub enum ZipError
+    // No end-of-central-directory record in the last 65,557 bytes.
+    // That window is the format's own bound — the EOCD is 22 bytes
+    // plus a comment of at most 65,535 — so past it the bytes are not
+    // a ZIP archive at all.  No offset: the reason is the absence of
+    // something, and there is no place to point at.
+    NoEndOfDirectory
+    // A central-directory header whose signature is not `PK\x01\x02`.
+    // `saw` is the four bytes that were there, because the common
+    // near-misses are recognisable: `PK\x03\x04` means the offsets
+    // point at a local header, `PK\x05\x06` means they point at the
+    // EOCD itself.
+    BadDirectorySignature(offset: Int, saw: Int)
+    // A local file header whose signature is not `PK\x03\x04`.
+    // Usually means the central directory's offset for this entry is
+    // wrong, which is what a ZIP that has been concatenated or
+    // spliced without rewriting looks like.
+    BadLocalSignature(offset: Int, saw: Int)
+    // The central directory claims to start or end outside the bytes
+    // the caller supplied.  `offset` is what it claimed and `len` what
+    // was actually there — both, because a wildly wrong offset is a
+    // corrupt EOCD and a slightly wrong one is usually a prefixed
+    // archive (a self-extracting stub) whose offsets need biasing.
+    DirectoryOutOfRange(offset: Int, len: Int)
+    // A compression method this package does not implement.  `name` is
+    // the entry and `method` the raw code, so a caller meets "bzip2"
+    // as the number 12 rather than as a refusal with no detail.
+    // Stored (0) and deflated (8) are the two that work.
+    UnsupportedMethod(name: Str, method: Int)
+    // An entry whose decompressed bytes do not match the CRC32 the
+    // directory recorded.  The entry's data is still returned by the
+    // call that produced it: a caller recovering a damaged archive
+    // wants what there is.
+    EntryCrcMismatch(name: Str, want: Int, got: Int)
+    // An entry whose decompressed length does not match the size the
+    // directory recorded.  Separate from the CRC because a matching
+    // CRC with a wrong length means the directory is stale rather
+    // than the data corrupt, and a caller re-indexing the archive
+    // needs to know which.
+    EntrySizeMismatch(name: Str, want: Int, got: Int)
+    // A field is at its 32-bit sentinel and no ZIP64 record supplies
+    // the real value: a size or offset of 0xFFFFFFFF, or an entry
+    // count of 0xFFFF, with no ZIP64 end-of-directory behind it.
+    // `field` names which.  This is a truncated or mis-written
+    // archive, not an unsupported one — zip-nv reads ZIP64.
+    Zip64Required(field: Str)
+    // A ZIP64 end-of-central-directory locator that does not parse, or
+    // whose pointer does not land on a ZIP64 EOCD record.
+    BadZip64Locator(offset: Int)
+    // An entry with the encryption bit set.  Reported and not
+    // supported: ZipCrypto is broken and AES-encrypted ZIPs are a
+    // vendor extension, and a package that silently returned the
+    // ciphertext would be worse than one that says so.
+    EncryptedEntry(name: Str)
+    // The entry's DEFLATE stream would not decode.  flate-nv's own
+    // error, carried through rather than flattened, so
+    // `flateerror.offset_of` still works from out here — the offset it
+    // gives is into the ENTRY's stream, and `entry.data_offset` is what
+    // turns that into a position in the file.
+    ZipFlateFailed(name: Str, cause: FlateError)
+    // The stream underneath a streaming read failed.  The host's
+    // error, unmodified.
+    ZipSourceFailed(cause: IoError)
+
+// The one-line message, for a caller who is printing rather than
+// matching.
+//
+// `Result<T, ZipError>` requires it — SPEC § 3.4 makes `Error` the
+// bound on a result's error type — so this impl exists whether or not
+// an interface release has anything to say yet, and its body is a
+// `todo()` like every other body here.
+impl Error for ZipError
+    // Panics with `not implemented` until the bodies land.
+    fn message(self) -> Str
+        todo("zip-nv.ZipError.message")
+
+// The absolute byte offset in the archive the error is about, or `-1`
+// when it is not about a place.
+//
+// The entry-level failures answer `-1` and `entry_of` instead: a CRC
+// mismatch is about a file, not about a byte, and the byte it would
+// have to name is the first one that differed, which a decoder that
+// verifies at the end does not know.
+//
+// ```novo
+// use ziperror
+//
+// fn main() [io]
+//     println("${ziperror.offset_of(BadLocalSignature(1024, 0))}")     // 1024
+// ```
+pub fn offset_of(e: ZipError) -> Int
+    todo("zip-nv.offset_of")
+
+// The entry name the error is about, or `None` when it is about the
+// container rather than an entry.
+//
+// The accessor a caller printing a report reaches for: `unzip` says
+// `src/main.nv: bad CRC` and so should anything built on this.
+//
+// ```novo
+// use ziperror
+//
+// fn main() [io]
+//     match ziperror.entry_of(EncryptedEntry("secret.txt"))
+//         Some(n) => println(n)                            // secret.txt
+//         None    => println("about the archive itself")
+// ```
+pub fn entry_of(e: ZipError) -> ?Str
+    todo("zip-nv.entry_of")
+
+// Whether the rest of the archive can still be read past this error.
+//
+// A ZIP is a directory, so one bad entry does not cost the others —
+// which is the property that makes partial recovery worth offering.
+// `UnsupportedMethod`, `EntryCrcMismatch`, `EntrySizeMismatch`,
+// `EncryptedEntry`, `ZipFlateFailed` and `BadLocalSignature` are all
+// about one entry and say true. `NoEndOfDirectory`,
+// `DirectoryOutOfRange`, `BadDirectorySignature`, `Zip64Required` and
+// `BadZip64Locator` are about the directory itself, without which
+// there is nothing to skip to.
+//
+// ```novo
+// use ziperror
+//
+// fn main() [io]
+//     println("${ziperror.is_entry_local(EncryptedEntry("a"))}")   // true
+// ```
+pub fn is_entry_local(e: ZipError) -> Bool
+    todo("zip-nv.is_entry_local")

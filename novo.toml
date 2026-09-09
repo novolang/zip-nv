@@ -1,0 +1,41 @@
+[package]
+name        = "zip-nv"
+version     = "0.0.1"
+description = "The ZIP container over flate-nv, read the way a ZIP is meant to be read: parse the end record and the central directory from the tail a caller supplies, then ask for the byte range one entry needs. Local headers, ZIP64, stored and deflated entries, a writer that returns bytes as it goes, and the name check an extractor has to make."
+license     = "Apache-2.0"
+
+# An INTERFACE release: every `pub fn` body is a `todo()`, so the
+# signatures and the effect rows are published and nothing is
+# implemented.  `novo pkg publish` recognises the shape and requires
+# both the draft stability and the 0.0.x version; the first
+# implementation is the 0.1.0 published over it.
+stability   = "draft"
+
+# `core`.  A ZIP is random-access by construction — the directory at
+# the end says where everything is — so the read side is arithmetic
+# over ranges the CALLER performs, which is the sans-IO shape at its
+# most natural rather than at its most strained.  The one function that
+# takes a stream stays inside the budget by BINDING its cost rather
+# than spending one: `zipread.read_forwards<S: Read[e]>(…) -> … [e]` is
+# charged whatever the caller's impl supplies (SPEC § 5.6).
+layer       = "core"
+
+category    = "compression"
+
+tags        = ["zip", "archive", "deflate", "zip64", "sans-io", "container"]
+repository  = "https://github.com/novolang/zip-nv"
+maintainers = ["novo-lang"]
+
+# A library: no `main`, so `novo pkg build` type-checks and
+# effect-checks every module under `src/` and writes no binary.
+
+[docs.pages]
+"README.md" = "Reading a ZIP the way a ZIP is meant to be read"
+
+[dependencies]
+# flate-nv, because method 8 — the one every ZIP entry that is not
+# stored uses — is a raw DEFLATE stream, and because a ZIP entry's
+# integrity check is exactly flate-nv's CRC32.  Both are `core`, so
+# `dep-layer` holds.  The path is what the monorepo builds against;
+# the version is what a consumer resolves.
+flate-nv = { path = "../flate-nv", version = "^0.0.1" }
