@@ -1,6 +1,6 @@
 [package]
 name        = "zip-nv"
-version     = "0.0.2"
+version     = "0.0.3"
 description = "The ZIP container over flate-nv, read the way a ZIP is meant to be read: parse the end record and the central directory from the tail a caller supplies, then ask for the byte range one entry needs. Local headers, ZIP64, stored and deflated entries, a writer that returns bytes as it goes, and the name check an extractor has to make."
 license     = "Apache-2.0"
 
@@ -25,6 +25,7 @@ category    = "compression"
 tags        = ["zip", "archive", "deflate", "zip64", "sans-io", "container"]
 repository  = "https://github.com/novolang/zip-nv"
 maintainers = ["novo-lang"]
+novo        = ">= 0.8.9"
 
 # A library: no `main`, so `novo pkg build` type-checks and
 # effect-checks every module under `src/` and writes no binary.
@@ -38,4 +39,4 @@ maintainers = ["novo-lang"]
 # integrity check is exactly flate-nv's CRC32.  Both are `core`, so
 # `dep-layer` holds.  The path is what the monorepo builds against;
 # the version is what a consumer resolves.
-flate-nv = "^0.0.1"
+flate-nv = "^0.0.2"

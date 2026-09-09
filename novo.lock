@@ -3,6 +3,6 @@
 [flate-nv]
 source = "registry"
 url = "https://registry.novo-lang.org"
-req = "^0.0.1"
-version = "0.0.1"
-hash = "64b1c3c773e584caedaf3de0487296fe7360c29c0e1257e43839fe24d8572ccc"
+req = "^0.0.2"
+version = "0.0.2"
+hash = "94526969eb11b1c539e1eaad561a1036c127902eb4d4c467f9c12fc098e4790c"
